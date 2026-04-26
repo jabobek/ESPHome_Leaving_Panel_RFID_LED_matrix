@@ -1,0 +1,435 @@
+substitutions:
+  name: "home-leaving-panel"
+  friendly_name: "Leaving Panel"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  project: {name: "jara.mcnet-leaving-panel", version: "2.28"}
+  on_boot:
+    priority: 900
+    then:
+      - lambda: |-
+          #include "soc/soc.h"
+          #include "soc/rtc_cntl_reg.h"
+          WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+      - delay: 2s
+      - light.control: {id: matrix_light, state: ON, brightness: 50%}
+
+esp32:
+  board: esp32dev
+  framework: {type: arduino}
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 300ms
+    window: 200ms
+    active: true
+
+logger:
+api:
+  services:
+    - service: show_ok
+      then: [button.press: button_show_ok]
+    - service: show_error
+      then: [button.press: button_show_error]
+
+wifi:
+  ssid: "sample_ssid"
+  password: "sample_password"
+
+i2c: {sda: 21, scl: 22}
+spi: {clk_pin: 18, mosi_pin: 23, miso_pin: 19}
+
+globals:
+  - id: g_panel_state
+    type: int
+    initial_value: '0'
+  - id: countdown_timer
+    type: int
+    initial_value: '0'
+  - id: return_to_idle_timer
+    type: int
+    initial_value: '0'
+  - id: scroll_offset
+    type: int
+    initial_value: '0'
+  - id: scroll_tick
+    type: int
+    initial_value: '0'
+  - id: weather_frame
+    type: int
+    initial_value: '0'
+  - id: previous_state
+    type: int
+    initial_value: '0'
+  - id: g_weather_on_leave
+    type: bool
+    initial_value: 'true'
+    restore_value: true
+
+sensor:
+  - platform: aht10
+    temperature: {name: "Temperature"}
+    humidity: {name: "Humidity"}
+    update_interval: 60s
+  - platform: template
+    name: "Panel State"
+    id: panel_state
+    accuracy_decimals: 0
+    lambda: 'return (float)id(g_panel_state);'
+    update_interval: 500ms
+
+binary_sensor:
+  - platform: ble_presence
+    mac_address: "XX:XX:XX:XX:XX:XX"
+    name: "Presence Tracker 1"
+    timeout: 1min
+  - platform: ble_presence
+    mac_address: "YY:YY:YY:YY:YY:YY"
+    name: "Presence Tracker 2"
+    timeout: 1min
+  - platform: gpio
+    pin: {number: 14, mode: INPUT_PULLUP, inverted: true}
+    name: "Panel Button"
+    on_multi_click:
+      - timing: [ON for at most 0.8s]
+        then:
+          - lambda: |-
+              if (id(g_panel_state) == 1) {
+                id(countdown_timer) += 60;
+                if (id(countdown_timer) > 300) id(countdown_timer) = 300;
+              } else { id(g_panel_state) = 1; id(countdown_timer) = 60; }
+          - light.turn_on: {id: matrix_light}
+      - timing: [ON for at least 1s]
+        then: 
+          - lambda: "id(g_panel_state) = 0; id(countdown_timer) = 0;"
+          - light.turn_off: matrix_light
+  - platform: gpio
+    pin: {number: 27, mode: INPUT_PULLUP, inverted: true}
+    name: "Door Sensor"
+    filters: [{delayed_on: 50ms}, {delayed_off: 50ms}]
+
+rc522_spi:
+  cs_pin: 5
+  reset_pin: 4
+  on_tag:
+    then:
+      - homeassistant.event:
+          event: esphome.rfid_scan
+          data: {tag_id: !lambda 'return x;'}
+      - text_sensor.template.publish: {id: last_tag, state: !lambda 'return x;'}
+      - script.execute: clear_tag_script
+
+script:
+  - id: clear_tag_script
+    then: [delay: 5s, text_sensor.template.publish: {id: last_tag, state: "unknown"}]
+
+text_sensor:
+  - {platform: template, name: "Last Tag", id: last_tag}
+  - platform: template
+    name: "Lock Status"
+    id: lock_status
+    lambda: 'if (id(g_panel_state) == 2) return {"Locked"}; return {"Unlocked"};'
+    update_interval: 1s
+
+switch:
+  - platform: template
+    name: "Weather on Leave"
+    id: weather_on_leave
+    lambda: 'return id(g_weather_on_leave);'
+    turn_on_action: {lambda: 'id(g_weather_on_leave) = true;'}
+    turn_off_action: {lambda: 'id(g_weather_on_leave) = false;'}
+  - {platform: gpio, name: "Relay Output 1", pin: {number: 32, inverted: true}, id: out_1, restore_mode: ALWAYS_OFF}
+  - {platform: gpio, name: "Relay Output 2", pin: {number: 33, inverted: true}, id: out_2, restore_mode: ALWAYS_OFF}
+  - {platform: gpio, name: "Relay Output 3", pin: {number: 25, inverted: true}, id: out_3, restore_mode: ALWAYS_OFF}
+  - {platform: gpio, name: "Relay Output 4", pin: {number: 26, inverted: true}, id: out_4, restore_mode: ALWAYS_OFF}
+
+light:
+  - platform: neopixelbus
+    type: GRB
+    variant: WS2812
+    pin: 13
+    num_leds: 128
+    name: "LED Matrix"
+    id: matrix_light
+    restore_mode: ALWAYS_ON
+    default_transition_length: 0s
+    effects:
+      - addressable_lambda: {name: "Custom Matrix Effect", update_interval: 50ms, lambda: "// Logic in display"}
+
+select:
+  - platform: template
+    name: "Display Mode"
+    id: display_mode
+    options: ["Off", "Number", "Icon", "Text", "Weather"]
+    initial_option: "Off"
+    optimistic: true
+  - platform: template
+    name: "Weather Type"
+    id: weather_type
+    options: ["Sun", "Partly Cloudy", "Cloudy", "Rain", "Storm", "Storm and Rain", "Windy", "Clear Night", "Night Rain", "Night Storm", "Unknown"]
+    initial_option: "Sun"
+    optimistic: true
+  - platform: template
+    name: "Moon Phase"
+    id: moon_phase
+    options: ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous", "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"]
+    initial_option: "Full Moon"
+    optimistic: true
+
+number:
+  - platform: template
+    name: "Display Number"
+    id: display_number
+    min_value: -999
+    max_value: 999
+    step: 0.1
+    initial_value: 0
+    optimistic: true
+  - platform: template
+    name: "External Temp"
+    id: ext_temp
+    min_value: -50
+    max_value: 50
+    step: 1
+    initial_value: 0
+    optimistic: true
+  - platform: template
+    name: "Scroll Speed"
+    id: scroll_speed
+    min_value: 50
+    max_value: 500
+    step: 10
+    initial_value: 120
+    unit_of_measurement: "ms"
+    optimistic: true
+
+text:
+  - {platform: template, name: "Display Text", id: display_text, mode: TEXT, initial_value: "Hello", optimistic: true}
+  - {platform: template, name: "Display Unit", id: display_unit, mode: TEXT, initial_value: "", optimistic: true}
+  - {platform: template, name: "Icon Mask", id: icon_mask, mode: TEXT, initial_value: "0", optimistic: true}
+
+button:
+  - platform: template
+    name: "Show OK"
+    id: button_show_ok
+    on_press:
+      - lambda: |-
+          id(previous_state) = 0; 
+          id(g_panel_state) = 3; 
+          id(return_to_idle_timer) = 3000;
+          id(matrix_light)->turn_on().perform();
+  - platform: template
+    name: "Show Error"
+    id: button_show_error
+    on_press:
+      - lambda: |-
+          if (id(g_panel_state) < 3) id(previous_state) = id(g_panel_state);
+          id(g_panel_state) = 4; 
+          id(return_to_idle_timer) = 3000;
+          id(matrix_light)->turn_on().perform();
+
+display:
+  - platform: addressable_light
+    id: matrix_display
+    addressable_light_id: matrix_light
+    width: 16
+    height: 8
+    pixel_mapper: |-
+      int p = x / 8; int lx = x % 8; return (p * 64) + (y * 8) + lx;
+    lambda: |-
+      static const uint8_t font8px[][5] = {
+        {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x4f,0x00,0x00}, {0x00,0x07,0x00,0x07,0x00}, {0x14,0x7f,0x14,0x7f,0x14}, 
+        {0x24,0x2a,0x7f,0x2a,0x12}, {0x23,0x13,0x08,0x64,0x62}, {0x36,0x49,0x55,0x22,0x50}, {0x00,0x05,0x03,0x00,0x00}, 
+        {0x00,0x1c,0x22,0x41,0x00}, {0x00,0x41,0x22,0x1c,0x00}, {0x14,0x08,0x3e,0x08,0x14}, {0x08,0x08,0x3e,0x08,0x08}, 
+        {0x00,0x50,0x30,0x00,0x00}, {0x08,0x08,0x08,0x08,0x08}, {0x00,0x60,0x60,0x00,0x00}, {0x20,0x10,0x08,0x04,0x02}, 
+        {0x3e,0x51,0x49,0x45,0x3e}, {0x00,0x42,0x7f,0x40,0x00}, {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4b,0x31}, 
+        {0x18,0x14,0x12,0x7f,0x10}, {0x27,0x45,0x45,0x45,0x39}, {0x3c,0x4a,0x49,0x30,0x00}, {0x01,0x71,0x09,0x05,0x03}, 
+        {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1e}, {0x00,0x36,0x36,0x00,0x00}, {0x00,0x56,0x36,0x00,0x00}, 
+        {0x08,0x14,0x22,0x41,0x00}, {0x14,0x14,0x14,0x14,0x14}, {0x00,0x41,0x22,0x14,0x08}, {0x02,0x01,0x51,0x09,0x06}, 
+        {0x32,0x49,0x79,0x41,0x3e}, {0x7e,0x11,0x11,0x11,0x7e}, {0x7f,0x49,0x49,0x49,0x36}, {0x3e,0x41,0x41,0x41,0x22}, 
+        {0x7f,0x41,0x41,0x22,0x1c}, {0x7f,0x49,0x49,0x49,0x41}, {0x7f,0x09,0x09,0x09,0x01}, {0x3e,0x41,0x49,0x49,0x7a}, 
+        {0x7f,0x08,0x08,0x08,0x7f}, {0x00,0x41,0x7f,0x41,0x00}, {0x20,0x40,0x41,0x3f,0x01}, {0x7f,0x08,0x14,0x22,0x41}, 
+        {0x7f,0x40,0x40,0x40,0x40}, {0x7f,0x02,0x0c,0x02,0x7f}, {0x7f,0x04,0x08,0x10,0x7f}, {0x3e,0x41,0x41,0x41,0x3e}, 
+        {0x7f,0x09,0x09,0x09,0x06}, {0x3e,0x41,0x51,0x21,0x5e}, {0x7f,0x09,0x19,0x29,0x46}, {0x46,0x49,0x49,0x49,0x31}, 
+        {0x01,0x01,0x7f,0x01,0x01}, {0x3f,0x40,0x40,0x40,0x3f}, {0x1f,0x20,0x40,0x20,0x1f}, {0x3f,0x40,0x38,0x40,0x3f}, 
+        {0x63,0x14,0x08,0x14,0x63}, {0x07,0x08,0x70,0x08,0x07}, {0x61,0x51,0x49,0x45,0x43},
+        {0x00,0x06,0x09,0x06,0x00} // ASCII 92 - Deg symbol (\)
+      };
+
+      static const uint8_t num3x5[11][5] = {
+        {7,5,5,5,7}, {2,2,2,2,2}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1}, {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}, {0,2,0,2,0}
+      };
+      
+      static const uint8_t num3x7[11][7] = {
+        {7,5,5,5,5,5,7}, {2,6,2,2,2,2,7}, {7,1,1,7,4,4,7}, {7,1,1,7,1,1,7}, {5,5,5,7,1,1,1}, {7,4,4,7,1,1,7}, {7,4,4,7,5,5,7}, {7,1,1,1,1,1,1}, {7,5,5,7,5,5,7}, {7,5,5,7,1,1,7}, {0,0,0,7,0,0,0}
+      };
+
+      auto draw_char = [&](int x, int y, char c, Color color) {
+        if (c >= 'a' && c <= 'z') c -= 32; if (c < 32 || c > 92) return;
+        int idx = c - 32;
+        for (int col = 0; col < 5; col++) {
+          uint8_t line = font8px[idx][col];
+          for (int row = 0; row < 8; row++) if (line & (1 << row)) it.draw_pixel_at(x + col, y + row, color);
+        }
+      };
+
+      auto draw_text = [&](int x, int y, std::string text, Color color) {
+        int cx = x; for (char c : text) { draw_char(cx, y, c, color); cx += 6; }
+      };
+
+      auto draw_num3x5 = [&](int x, int y, int n, Color c) {
+        if (n<0 || n>10) return;
+        for (int r=0; r<5; r++) for (int l=0; l<3; l++) if (num3x5[n][r] & (1<<(2-l))) it.draw_pixel_at(x+l, y+r, c);
+      };
+
+      auto draw_num3x7 = [&](int x, int y, int n, Color c) {
+        if (n<0 || n>10) return;
+        for (int r=0; r<7; r++) for (int l=0; l<3; l++) if (num3x7[n][r] & (1<<(2-l))) it.draw_pixel_at(x+l, y+r, c);
+      };
+
+      auto draw_cloud_outline = [&](int x, int y, Color c) {
+        it.draw_pixel_at(x+1, y, c); it.draw_pixel_at(x+2, y, c);
+        it.draw_pixel_at(x, y+1, c); it.draw_pixel_at(x+3, y+1, c);
+        it.draw_pixel_at(x-1, y+2, c); it.draw_pixel_at(x+4, y+2, c);
+        it.line(x-1, y+3, x+4, y+3, c);
+      };
+
+      auto draw_moon_phase = [&](int ox, int oy, std::string phase, Color col) {
+        Color dim_col(70, 70, 40);
+        it.circle(ox+3, oy+3, 3, dim_col);
+        auto p = [&](int lx, int ly) { it.draw_pixel_at(ox + lx, oy + ly, col); };
+        if (phase == "Full Moon") { it.filled_circle(ox+3, oy+3, 3, col); }
+        else if (phase == "First Quarter") { for(int y=0;y<7;y++) for(int x=3;x<7;x++) if(pow(x-3,2)+pow(y-3,2)<=12) p(x,y); }
+        else if (phase == "Last Quarter") { for(int y=0;y<7;y++) for(int x=0;x<=3;x++) if(pow(x-3,2)+pow(y-3,2)<=12) p(x,y); }
+        else if (phase == "Waxing Crescent") { it.line(ox+4, oy+1, ox+5, oy+1, col); it.line(ox+5, oy+2, ox+6, oy+2, col); p(6,3); it.line(ox+5, oy+4, ox+6, oy+4, col); it.line(ox+4, oy+5, ox+5, oy+5, col); }
+        else if (phase == "Waning Crescent") { it.line(ox+1, oy+1, ox+2, oy+1, col); it.line(ox+0, oy+2, ox+1, oy+2, col); p(0,3); it.line(ox+0, oy+4, ox+1, oy+4, col); it.line(ox+1, oy+5, ox+2, oy+5, col); }
+        else if (phase == "Waxing Gibbous") { it.filled_circle(ox+3, oy+3, 3, col); it.draw_pixel_at(ox, oy+2, dim_col); it.draw_pixel_at(ox, oy+3, dim_col); it.draw_pixel_at(ox, oy+4, dim_col); }
+        else if (phase == "Waning Gibbous") { it.filled_circle(ox+3, oy+3, 3, col); it.draw_pixel_at(ox+6, oy+2, dim_col); it.draw_pixel_at(ox+6, oy+3, dim_col); it.draw_pixel_at(ox+6, oy+4, dim_col); }
+      };
+
+      auto draw_weather_anim = [&](std::string type, int frame, int ox) {
+        Color yellow(255,255,0), white(255,255,255), blue(0,0,255), lblue(0,191,255), mcol(255,255,180);
+        std::string phase = id(moon_phase).state;
+        if (type == "Sun") {
+           it.circle(ox+3, 3, 2, yellow);
+           if (frame%3==0) { it.line(ox+3,0,ox+3,1,yellow); it.line(ox+3,5,ox+3,6,yellow); it.line(ox,3,ox+1,3,yellow); it.line(ox+5,3,ox+6,3,yellow); }
+           else if (frame%3==1) { it.draw_pixel_at(ox+1,1,yellow); it.draw_pixel_at(ox+5,1,yellow); it.draw_pixel_at(ox+1,5,yellow); it.draw_pixel_at(ox+5,5,yellow); }
+           else { it.line(ox+3,0,ox+3,6,yellow); it.line(ox,3,ox+6,3,yellow); }
+        } else if (type == "Partly Cloudy") {
+           it.circle(ox+2, 2, 2, yellow); 
+           int step = frame % 5;
+           if (step == 0) { it.draw_pixel_at(ox+2,4,yellow); it.draw_pixel_at(ox+4,2,yellow); }
+           else if (step == 2) { it.draw_pixel_at(ox+2,5,yellow); it.draw_pixel_at(ox+5,2,yellow); }
+           int cloud_ox = ox+3 + (step == 1 ? 1 : (step == 3 ? -1 : 0));
+           it.filled_rectangle(cloud_ox-1, 2, 6, 4, Color(0,0,0)); draw_cloud_outline(cloud_ox, 2, white);
+        } else if (type == "Cloudy") {
+           draw_cloud_outline(ox+(frame%8)-4, 2, white);
+        } else if (type == "Rain" || type == "Night Rain") {
+           if (type == "Rain") draw_cloud_outline(ox+2, 1, white); else draw_moon_phase(ox, 0, phase, mcol);
+           for(int i=0; i<3; i++) it.draw_pixel_at(ox+1+i*2, 5+((frame+i)%3), blue);
+        } else if (type == "Storm" || type == "Storm and Rain" || type == "Night Storm") {
+           if (type.find("Night") != std::string::npos) draw_moon_phase(ox, 0, phase, mcol); else draw_cloud_outline(ox+2, 1, white);
+           if (frame%3==1) { it.line(ox+3,3,ox+1,5,yellow); it.line(ox+1,5,ox+4,5,yellow); it.line(ox+4,5,ox+2,7,yellow); }
+           if (type.find("Rain") != std::string::npos || type == "Night Storm") for(int i=0; i<2; i++) it.draw_pixel_at(ox+1+i*4, 5+((frame+i)%3), blue);
+        } else if (type == "Windy") {
+           draw_cloud_outline(ox+2, 1, white); it.line((frame*3)%10, 5, (frame*3+2)%10, 5, lblue); it.line(((frame*3+5)%10), 6, ((frame*3+7)%10), 6, lblue);
+        } else if (type == "Clear Night") {
+           draw_moon_phase(ox, 0, phase, mcol);
+        }
+      };
+
+      auto draw_temp_right = [&](Color col) {
+         float raw_t = id(ext_temp).state; if (std::isnan(raw_t) || std::isinf(raw_t)) return;
+         int et = (int)raw_t; int ta = abs(et);
+         if (et < 0) { 
+           it.draw_pixel_at(8, 3, col);
+           if (ta >= 10) { draw_num3x7(10, 0, (ta/10)%10, col); draw_num3x7(13, 0, ta % 10, col); }
+           else { draw_num3x7(11, 0, ta % 10, col); }
+         } else {
+           if (et >= 10) { draw_num3x7(9, 0, (et/10)%10, col); draw_num3x7(13, 0, et % 10, col); }
+           else draw_num3x7(11, 0, et % 10, col);
+         }
+      };
+
+      it.fill(Color::BLACK);
+      int st = id(g_panel_state); int fr = id(weather_frame);
+      auto remote_vals = id(matrix_light).remote_values;
+      Color cur_c = Color(remote_vals.get_red() * 255, remote_vals.get_green() * 255, remote_vals.get_blue() * 255);
+      if (remote_vals.get_state() == 0.0f) cur_c = Color(255, 255, 255);
+
+      if (st == 1) { // COUNTDOWN
+        int rem = id(countdown_timer);
+        if (id(g_weather_on_leave) && rem > 30) {
+           if (id(weather_type).state != "Unknown") draw_weather_anim(id(weather_type).state, fr, 0);
+           for (int i=0; i<(rem*16/60); i++) it.draw_pixel_at(i, 7, Color(255, 0, 0));
+           draw_temp_right(cur_c);
+        } else {
+           if (rem > 60) {
+             int m=rem/60, s=rem%60;
+             draw_num3x5(0,1, m/10, cur_c); draw_num3x5(4,1, m%10, cur_c);
+             it.draw_pixel_at(7,2, cur_c); it.draw_pixel_at(7,4, cur_c);
+             draw_num3x5(9,1, s/10, cur_c); draw_num3x5(13,1, s%10, cur_c);
+           } else {
+             char b[4]; sprintf(b, "%02d", rem); Color c = (rem <= 10) ? Color(255,165,0) : cur_c;
+             draw_char(2, 0, b[0], c); draw_char(9, 0, b[1], c);
+           }
+        }
+      } else if (st == 2) { // LOCKED
+        if (id(return_to_idle_timer) > 0) {
+          Color r = Color(255, 0, 0);
+          it.filled_rectangle(4,4,8,4,r); 
+          it.line(5,1,5,3,r); it.line(10,1,10,3,r); it.line(6,0,9,0,r);
+          it.draw_pixel_at(5,0,r); it.draw_pixel_at(10,0,r); 
+        }
+      } else if (st == 3 || st == 4) {
+        if (st == 3) {
+           draw_text(0,0,"OK",Color(0, 255, 0)); it.line(11,4,13,6,Color(0, 255, 0)); it.line(13,6,15,2,Color(0, 255, 0));
+        } else {
+           Color r = Color(255, 0, 0);
+           it.line(3,0,12,7,r); it.line(3,7,12,0,r); it.line(4,0,13,7,r); it.line(4,7,13,0,r);
+        }
+      } else { // IDLE
+        std::string m = id(display_mode).state;
+        if (m == "Number") {
+          char b[16]; sprintf(b, "%.1f", id(display_number).state); std::string s = std::string(b) + id(display_unit).state;
+          int w = s.length()*6; if (w<=16) draw_text((16-w)/2,0,s,cur_c); else draw_text(16-id(scroll_offset),0,s,cur_c);
+        } else if (m == "Icon") {
+          std::string mk = id(icon_mask).state; for (int i=0; i<128 && i<(int)mk.length(); i++) if (mk[i]=='1') it.draw_pixel_at(i%16, i/16, cur_c);
+        } else if (m == "Text") {
+          int w = id(display_text).state.length()*6; if (w<=16) draw_text((16-w)/2,0,id(display_text).state,cur_c); else draw_text(16-id(scroll_offset),0,id(display_text).state,cur_c);
+        } else if (m == "Weather") {
+          if (id(weather_type).state != "Unknown") {
+            draw_weather_anim(id(weather_type).state, fr, 0);
+            draw_temp_right(cur_c);
+          }
+        }
+      }
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(g_panel_state) == 1) {
+            id(countdown_timer)--;
+            if (id(countdown_timer) <= 0) { id(g_panel_state) = 2; id(return_to_idle_timer) = 60000; id(previous_state) = 0; }
+          }
+          if (id(return_to_idle_timer) > 0) {
+            id(return_to_idle_timer) -= 1000;
+            if (id(return_to_idle_timer) <= 0) if (id(g_panel_state) != 2) id(g_panel_state) = id(previous_state);
+          }
+  - interval: 10ms
+    then:
+      - lambda: |-
+          if ((id(display_mode).state == "Text" || id(display_mode).state == "Number") && id(g_panel_state) == 0) {
+            id(scroll_tick)++;
+            if (id(scroll_tick) >= (int)id(scroll_speed).state / 10) {
+              id(scroll_tick) = 0; id(scroll_offset)++;
+              int tw = (id(display_mode).state == "Text") ? id(display_text).state.length()*6 : 40;
+              if (id(scroll_offset) > tw + 16) id(scroll_offset) = 0;
+            }
+          }
+  - interval: 400ms
+    then: {lambda: 'id(weather_frame) = (id(weather_frame) + 1) % 15;'}

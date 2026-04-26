@@ -1,0 +1,45 @@
+alias: Panel - Arrival/Departure Logic
+description: Control lights using RFID and automatic turn off when leaving
+triggers:
+  - entity_id: sensor.home_leaving_panel_last_tag
+    id: rfid_scanned
+    trigger: state
+  - entity_id: sensor.home_leaving_panel_panel_state_2
+    to: "2.0"
+    id: panel_locked
+    trigger: state
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: rfid_scanned
+          - condition: template
+            value_template: >-
+              {{ states('sensor.home_leaving_panel_last_tag') not in ['unknown',
+              'unavailable', 'None'] }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ states('sensor.home_leaving_panel_last_tag') in
+                      ['XX-XX-XX-XX', 'YY-YY-YY-YY', 'ZZ-ZZ-ZZ-ZZ'] }}
+                sequence:
+                  - target:
+                      entity_id: light.room_2_wall_light
+                    action: light.turn_on
+                  - target:
+                      entity_id: button.home_leaving_panel_show_ok_2
+                    action: button.press
+            default:
+              - target:
+                  entity_id: button.home_leaving_panel_show_error_2
+                action: button.press
+      - conditions:
+          - condition: trigger
+            id: panel_locked
+        sequence:
+          - target:
+              entity_id: light.room_2_wall_light
+            action: light.turn_off
+mode: restart

@@ -1,0 +1,43 @@
+alias: Panel - Weather Mode when LED strip light ON
+description: >-
+  Activates weather display when hallway light is turned on for 30 min, reverts
+  back or turns off when Locked
+triggers:
+  - entity_id: light.corridor_led_strip_light
+    to: "on"
+    trigger: state
+actions:
+  - variables:
+      original_mode: "{{ states('select.home_leaving_panel_display_mode_2') }}"
+  - target:
+      entity_id: select.home_leaving_panel_display_mode_2
+    data:
+      option: Weather
+    action: select.select_option
+  - wait_for_trigger:
+      - entity_id: sensor.home_leaving_panel_lock_status
+        to: Locked
+        trigger: state
+    timeout: "00:30:00"
+  - choose:
+      - conditions:
+          - "{{ wait.trigger != none }}"
+        sequence:
+          - target:
+              entity_id: select.home_leaving_panel_display_mode_2
+            data:
+              option: "Off"
+            action: select.select_option
+          - target:
+              entity_id: light.corridor_led_strip_light
+            action: light.turn_off
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger == none }}"
+        sequence:
+          - target:
+              entity_id: select.home_leaving_panel_display_mode_2
+            data:
+              option: "{{ original_mode }}"
+            action: select.select_option
+mode: restart

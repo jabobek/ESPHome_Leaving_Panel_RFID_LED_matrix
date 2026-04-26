@@ -1,0 +1,80 @@
+alias: Panel - Weather, Temperature and Moon Sync
+description: Syncs weather, temperature and moon phase to the panel (switches to moon at night)
+triggers:
+  - trigger: state
+    entity_id: sensor.outdoor_temperature # Replace with your outdoor temperature sensor
+  - trigger: state
+    entity_id: weather.home # Replace with your weather entity
+  - trigger: state
+    entity_id: sensor.moon_phase # Replace with your moon phase sensor
+actions:
+  # 1. Sync outdoor temperature
+  - target:
+      entity_id: number.home_leaving_panel_external_temp
+    data:
+      value: >-
+        {{ states('sensor.outdoor_temperature') | float | round(0) }}
+    action: number.set_value
+
+  # 2. Sync moon phase (Mapping sensor.moon_phase states to ESPHome)
+  - target:
+      entity_id: select.home_leaving_panel_moon_phase
+    data:
+      option: >
+        {% set phase = states('sensor.moon_phase') %}
+        {% set mapping = {
+          'new_moon': 'New Moon',
+          'waxing_crescent': 'Waxing Crescent',
+          'first_quarter': 'First Quarter',
+          'waxing_gibbous': 'Waxing Gibbous',
+          'full_moon': 'Full Moon',
+          'waning_gibbous': 'Waning Gibbous',
+          'last_quarter': 'Last Quarter',
+          'waning_crescent': 'Waning Crescent'
+        } %}
+        {{ mapping.get(phase, 'Full Moon') }}
+    action: select.select_option
+
+  # 3. Sync weather type with night logic (23h - 06h)
+  - target:
+      entity_id: select.home_leaving_panel_weather_type
+    data:
+      option: >
+        {% set cond = states('weather.home') %}
+        {% set hour = now().hour %}
+        {% set is_night = hour >= 23 or hour < 6 %}
+        
+        {% if is_night %}
+          {# NIGHT MODES - Display Moon + precipitation if any #}
+          {% if cond in ['sunny', 'clear-night'] %}
+            Clear Night
+          {% elif cond in ['rainy', 'pouring', 'snowy', 'snowy-rainy', 'hail'] %}
+            Night Rain
+          {% elif cond in ['lightning', 'lightning-rain'] %}
+            Night Storm
+          {% else %}
+            {# At night we prioritize showing the moon even when cloudy #}
+            Clear Night
+          {% endif %}
+        {% else %}
+          {# DAY MODES - Standard icons #}
+          {% if cond == 'sunny' %}
+            Sun
+          {% elif cond == 'partlycloudy' %}
+            Partly Cloudy
+          {% elif cond in ['cloudy', 'fog'] %}
+            Cloudy
+          {% elif cond in ['rainy', 'pouring', 'snowy', 'snowy-rainy', 'hail'] %}
+            Rain
+          {% elif cond == 'lightning' %}
+            Storm
+          {% elif cond == 'lightning-rain' %}
+            Storm and Rain
+          {% elif cond in ['windy', 'windy-variant'] %}
+            Windy
+          {% else %}
+            Unknown
+          {% endif %}
+        {% endif %}
+    action: select.select_option
+mode: restart
